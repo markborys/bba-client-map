@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<link rel="icon" href="data:,">
+<title>BBA Land Surveying – Project Map</title>
+<link rel="stylesheet" href="https://js.arcgis.com/4.30/esri/themes/light/main.css">
+<script src="https://js.arcgis.com/4.30/"></script>
+<style>
+  html,body{margin:0;height:100%;font-family:Arial,Helvetica,sans-serif}
+  #banner{position:absolute;top:0;left:0;right:0;z-index:5;background:#004f73;color:#fff;padding:10px 14px;font-size:16px;line-height:1.35;display:flex;gap:10px;align-items:center;justify-content:space-between}
+  #banner b{color:#ed9e05}
+  #done{background:#ed9e05;color:#fff;border:0;border-radius:6px;font-size:17px;font-weight:bold;padding:10px 18px;cursor:pointer;white-space:nowrap}
+  #view{position:absolute;top:62px;bottom:0;left:0;right:0}
+  #msg{position:absolute;left:50%;transform:translateX(-50%);bottom:24px;z-index:6;background:#fff;border:2px solid #004f73;border-radius:8px;padding:10px 16px;font-size:16px;display:none}
+  .esri-editor{font-size:16px} .esri-editor .esri-item-list__list-item{min-height:52px}
+  .esri-editor__panel-toolbar, .esri-editor .esri-item-list__filter-container{display:none!important}
+</style>
+</head>
+<body>
+<div id="banner"><span><b>Optional:</b> mark anything we should know about on your site, then tap <b>Done</b>.</span><button id="done">Done</button></div>
+<div id="view"></div><div id="msg"></div>
+<script>
+require(["esri/config","esri/WebMap","esri/views/MapView","esri/widgets/Editor","esri/layers/support/FeatureTemplate",
+         "esri/form/FormTemplate","esri/form/elements/FieldElement"],
+function(esriConfig, WebMap, MapView, Editor, FeatureTemplate, FormTemplate, FieldElement){
+  const qs = new URLSearchParams(location.search);
+  const job = (qs.get("job")||"").replace(/\D/g,"");
+  const webmapId = (qs.get("webmap")||"").replace(/[^0-9a-f]/gi,"");
+  const SVC = "https://services8.arcgis.com/E3yHp9BpQSbAjp3u/arcgis/rest/services/";
+  const msg = t => { const m=document.getElementById("msg"); m.textContent=t; m.style.display="block"; setTimeout(()=>m.style.display="none",4000); };
+  esriConfig.portalUrl = "https://www.arcgis.com";   // anonymous; no API key, no sign-in
+  esriConfig.request.useIdentity = false;
+  if(!webmapId || !job){
+    document.getElementById("banner").style.display = "none";
+    const viewEl = document.getElementById("view");
+    viewEl.style.top = "0";
+    viewEl.innerHTML = "<p style='padding:24px;font-size:18px;line-height:1.45;max-width:36rem'>This map link looks incomplete — please use the link from your BBA email</p>";
+    return;
+  }
+
+  const LABELS = {point:["Mark a spot","point"], polyline:["Draw a line","line"], polygon:["Outline an area","polygon"]};
+  const map = new WebMap({portalItem:{id:webmapId}});
+  const view = new MapView({container:"view", map, ui:{components:["zoom"]}, popup:{dockEnabled:false}});
+  window.__app = {view, ready:false};
+
+  view.when(async () => {
+    await map.loadAll();
+    const flat = map.allLayers.filter(l => l.type==="feature");
+    const edit = flat.filter(l => /ClientMarkups_view_\d+/.test(l.url||""));
+    const pid = job || ((edit.getItemAt(0)?.url||"").match(/ClientMarkups_view_(\d+)/)||[])[1];
+    window.__app.pid = pid;
+    // read-only for everything else (parcels, site pin)
+    flat.forEach(l => { if(!edit.includes(l)) l.editingEnabled = false; });
+    const infos = [];
+    for (const l of edit.toArray()){
+      await l.load();
+      const [label, tool] = LABELS[l.geometryType];
+      l.title = label;
+      // stamp ProjectID in the page itself: template prototype + hidden form value
+      l.templates = [new FeatureTemplate({name:label, drawingTool:tool, prototype:{attributes:{ProjectID:pid}}})];
+      l.formTemplate = new FormTemplate({title:label, elements:[new FieldElement({fieldName:"Notes", label:"Notes (optional)",
+                         description:"What should we know about this?"})]});
+      // safety net: if anything got saved without ProjectID, fix it right away
+      l.on("edits", async ev => {
+        const ids = (ev.addedFeatures||[]).map(f=>f.objectId).filter(x=>x!=null);
+        if(!ids.length) return;
+        await l.applyEdits({updateFeatures: ids.map(id=>({attributes:{[l.objectIdField]:id, ProjectID:pid}}))}).catch(()=>{});
+        msg("Saved – thank you!");
+      });
+      infos.push({layer:l, formTemplate:l.formTemplate, enabled:true, addEnabled:true, updateEnabled:true, deleteEnabled:false});
+    }
+    const editor = new Editor({view, layerInfos:infos,
+       visibleElements:{snappingControls:false, sketchTooltipControls:false, settingsMenu:false, undoRedoButtons:false},
+       supportingWidgetDefaults:{featureTemplates:{visibleElements:{filter:false}, groupBy:"none"}}});
+    view.ui.add(editor, view.widthBreakpoint==="xsmall" ? "bottom-left" : "top-right");
+    try { editor.startCreateFeaturesWorkflowAtFeatureTypeSelection(); } catch(e) {}
+    // test hook: same stamping path the Editor uses (template prototype), used by automated check
+    window.__app.createTest = async (geomType, x, y, notes) => {
+      const l = edit.find(k => k.geometryType===({esriGeometryPoint:"point",esriGeometryPolyline:"polyline",esriGeometryPolygon:"polygon"}[geomType]));
+      const attrs = Object.assign({}, l.templates[0].prototype.attributes, {Notes:notes});
+      const geometry = {esriGeometryPoint:{type:"point",x,y},
+        esriGeometryPolyline:{type:"polyline",paths:[[[x,y],[x+0.0001,y]]]},
+        esriGeometryPolygon:{type:"polygon",rings:[[[x,y],[x+0.0001,y],[x+0.0001,y+0.0001],[x,y]]]}}[geomType];
+      geometry.spatialReference={wkid:4326};
+      const r = await l.applyEdits({addFeatures:[{geometry, attributes:attrs}]});
+      return r.addFeatureResults[0];
+    };
+    window.__app.ready = true;
+  }).catch(e => { console.error(e); document.getElementById("view").innerHTML="<p style='padding:20px'>Sorry, the map could not load.</p>"; });
+
+  document.getElementById("done").onclick = () => { msg("Thanks! We'll review your notes with your proposal."); };
+});
+</script>
+</body>
+</html>
